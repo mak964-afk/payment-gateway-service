@@ -1,0 +1,222 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions
+    xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+    xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+    xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+    xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    id="Definitions_RecurringCharge"
+    targetNamespace="http://edux.ru/payments/bpmn">
+
+  <!-- ================================================================
+       Изолированный подпроцесс: "Рекуррентное списание по подписке"
+       с dunning-повторами. Включает Service Task, обработку ошибки
+       (Boundary Error Event), таймер backoff, развилку результата и
+       перевод подписки в PAST_DUE при исчерпании попыток.
+       Готов к импорту в Camunda 8 (Zeebe) / Storm BPMN.
+  ================================================================= -->
+  <bpmn:process id="Process_RecurringCharge" name="Рекуррентное списание по подписке" isExecutable="true">
+
+    <bpmn:startEvent id="StartEvent_1" name="Наступила дата списания">
+      <bpmn:outgoing>Flow_start_load</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:sequenceFlow id="Flow_start_load" sourceRef="StartEvent_1" targetRef="Task_LoadSubscription" />
+
+    <bpmn:task id="Task_LoadSubscription" name="Загрузить подписку и токен">
+      <bpmn:incoming>Flow_start_load</bpmn:incoming>
+      <bpmn:outgoing>Flow_load_charge</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:sequenceFlow id="Flow_load_charge" sourceRef="Task_LoadSubscription" targetRef="Task_ChargeAcquirer" />
+
+    <!-- Service Task списания с граничным событием ошибки -->
+    <bpmn:serviceTask id="Task_ChargeAcquirer" name="Списать по токену у эквайера">
+      <bpmn:incoming>Flow_load_charge</bpmn:incoming>
+      <bpmn:incoming>Flow_retry_loop</bpmn:incoming>
+      <bpmn:outgoing>Flow_charge_success</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:boundaryEvent id="Boundary_ChargeDeclined" name="Списание отклонено" attachedToRef="Task_ChargeAcquirer">
+      <bpmn:outgoing>Flow_declined_classify</bpmn:outgoing>
+      <bpmn:errorEventDefinition id="ErrDef_1" errorRef="Error_ChargeDeclined" />
+    </bpmn:boundaryEvent>
+
+    <bpmn:sequenceFlow id="Flow_declined_classify" sourceRef="Boundary_ChargeDeclined" targetRef="Gateway_ClassifyDecline" />
+
+    <!-- Развилка: постоянный отказ или временный -->
+    <bpmn:exclusiveGateway id="Gateway_ClassifyDecline" name="Тип отказа?">
+      <bpmn:incoming>Flow_declined_classify</bpmn:incoming>
+      <bpmn:outgoing>Flow_hard_decline</bpmn:outgoing>
+      <bpmn:outgoing>Flow_soft_decline</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:sequenceFlow id="Flow_hard_decline" name="Постоянный (expired_card)" sourceRef="Gateway_ClassifyDecline" targetRef="Task_RequestNewCard">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${declineType == "hard"}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <bpmn:sequenceFlow id="Flow_soft_decline" name="Временный" sourceRef="Gateway_ClassifyDecline" targetRef="Gateway_RetryCheck">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${declineType == "soft"}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <!-- Развилка: исчерпаны ли попытки dunning -->
+    <bpmn:exclusiveGateway id="Gateway_RetryCheck" name="Попытки dunning исчерпаны?">
+      <bpmn:incoming>Flow_soft_decline</bpmn:incoming>
+      <bpmn:outgoing>Flow_retry_wait</bpmn:outgoing>
+      <bpmn:outgoing>Flow_retry_exhausted</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:sequenceFlow id="Flow_retry_wait" name="Нет (attempts &lt; 3)" sourceRef="Gateway_RetryCheck" targetRef="Timer_DunningWait">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${attempts &lt; 3}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <!-- Таймер dunning (1 -> 3 -> 5 дней) -->
+    <bpmn:intermediateCatchEvent id="Timer_DunningWait" name="Пауза dunning (backoff)">
+      <bpmn:incoming>Flow_retry_wait</bpmn:incoming>
+      <bpmn:outgoing>Flow_retry_loop</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="Timer_1">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">P1D</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:sequenceFlow id="Flow_retry_loop" sourceRef="Timer_DunningWait" targetRef="Task_ChargeAcquirer" />
+
+    <bpmn:sequenceFlow id="Flow_retry_exhausted" name="Да (attempts = 3)" sourceRef="Gateway_RetryCheck" targetRef="Task_SubscriptionPastDue">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">${attempts &gt;= 3}</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+
+    <bpmn:task id="Task_SubscriptionPastDue" name="Подписка PAST_DUE + событие">
+      <bpmn:incoming>Flow_retry_exhausted</bpmn:incoming>
+      <bpmn:outgoing>Flow_pastdue_end</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:sequenceFlow id="Flow_pastdue_end" sourceRef="Task_SubscriptionPastDue" targetRef="EndEvent_Failed" />
+
+    <bpmn:endEvent id="EndEvent_Failed" name="Списание не удалось">
+      <bpmn:incoming>Flow_pastdue_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:task id="Task_RequestNewCard" name="Запросить обновление карты">
+      <bpmn:incoming>Flow_hard_decline</bpmn:incoming>
+      <bpmn:outgoing>Flow_newcard_end</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:sequenceFlow id="Flow_newcard_end" sourceRef="Task_RequestNewCard" targetRef="EndEvent_Failed" />
+
+    <!-- Ветка успеха -->
+    <bpmn:sequenceFlow id="Flow_charge_success" sourceRef="Task_ChargeAcquirer" targetRef="Task_RenewAndFiscalize" />
+
+    <bpmn:task id="Task_RenewAndFiscalize" name="Продлить период, чек, событие">
+      <bpmn:incoming>Flow_charge_success</bpmn:incoming>
+      <bpmn:outgoing>Flow_success_end</bpmn:outgoing>
+    </bpmn:task>
+
+    <bpmn:sequenceFlow id="Flow_success_end" sourceRef="Task_RenewAndFiscalize" targetRef="EndEvent_Success" />
+
+    <bpmn:endEvent id="EndEvent_Success" name="Подписка продлена">
+      <bpmn:incoming>Flow_success_end</bpmn:incoming>
+    </bpmn:endEvent>
+
+  </bpmn:process>
+
+  <bpmn:error id="Error_ChargeDeclined" name="ChargeDeclined" errorCode="CHARGE_DECLINED" />
+
+  <!-- ================== Diagram Interchange (DI) ================== -->
+  <bpmndi:BPMNDiagram id="BPMNDiagram_1">
+    <bpmndi:BPMNPlane id="BPMNPlane_1" bpmnElement="Process_RecurringCharge">
+
+      <bpmndi:BPMNShape id="Shape_StartEvent_1" bpmnElement="StartEvent_1">
+        <dc:Bounds x="150" y="200" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="130" y="243" width="80" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_LoadSubscription" bpmnElement="Task_LoadSubscription">
+        <dc:Bounds x="240" y="178" width="130" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_ChargeAcquirer" bpmnElement="Task_ChargeAcquirer">
+        <dc:Bounds x="430" y="178" width="140" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Boundary_ChargeDeclined" bpmnElement="Boundary_ChargeDeclined">
+        <dc:Bounds x="482" y="240" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="520" y="270" width="80" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_ClassifyDecline" bpmnElement="Gateway_ClassifyDecline" isMarkerVisible="true">
+        <dc:Bounds x="475" y="360" width="50" height="50" />
+        <bpmndi:BPMNLabel><dc:Bounds x="468" y="415" width="65" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_RequestNewCard" bpmnElement="Task_RequestNewCard">
+        <dc:Bounds x="240" y="345" width="150" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Gateway_RetryCheck" bpmnElement="Gateway_RetryCheck" isMarkerVisible="true">
+        <dc:Bounds x="640" y="360" width="50" height="50" />
+        <bpmndi:BPMNLabel><dc:Bounds x="625" y="415" width="80" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Timer_DunningWait" bpmnElement="Timer_DunningWait">
+        <dc:Bounds x="647" y="467" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="625" y="505" width="80" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_SubscriptionPastDue" bpmnElement="Task_SubscriptionPastDue">
+        <dc:Bounds x="790" y="345" width="150" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_Failed" bpmnElement="EndEvent_Failed">
+        <dc:Bounds x="1002" y="367" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="980" y="410" width="82" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_Task_RenewAndFiscalize" bpmnElement="Task_RenewAndFiscalize">
+        <dc:Bounds x="640" y="178" width="160" height="80" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNShape id="Shape_EndEvent_Success" bpmnElement="EndEvent_Success">
+        <dc:Bounds x="862" y="200" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="842" y="243" width="80" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="Edge_Flow_start_load" bpmnElement="Flow_start_load">
+        <di:waypoint x="186" y="218" /><di:waypoint x="240" y="218" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_load_charge" bpmnElement="Flow_load_charge">
+        <di:waypoint x="370" y="218" /><di:waypoint x="430" y="218" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_charge_success" bpmnElement="Flow_charge_success">
+        <di:waypoint x="570" y="218" /><di:waypoint x="640" y="218" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_success_end" bpmnElement="Flow_success_end">
+        <di:waypoint x="800" y="218" /><di:waypoint x="862" y="218" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_declined_classify" bpmnElement="Flow_declined_classify">
+        <di:waypoint x="500" y="276" /><di:waypoint x="500" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_hard_decline" bpmnElement="Flow_hard_decline">
+        <di:waypoint x="475" y="385" /><di:waypoint x="390" y="385" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_soft_decline" bpmnElement="Flow_soft_decline">
+        <di:waypoint x="525" y="385" /><di:waypoint x="640" y="385" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_retry_wait" bpmnElement="Flow_retry_wait">
+        <di:waypoint x="665" y="410" /><di:waypoint x="665" y="467" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_retry_loop" bpmnElement="Flow_retry_loop">
+        <di:waypoint x="665" y="503" /><di:waypoint x="665" y="540" /><di:waypoint x="500" y="540" /><di:waypoint x="500" y="258" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_retry_exhausted" bpmnElement="Flow_retry_exhausted">
+        <di:waypoint x="690" y="385" /><di:waypoint x="790" y="385" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_pastdue_end" bpmnElement="Flow_pastdue_end">
+        <di:waypoint x="940" y="385" /><di:waypoint x="1002" y="385" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Flow_newcard_end" bpmnElement="Flow_newcard_end">
+        <di:waypoint x="315" y="425" /><di:waypoint x="315" y="600" /><di:waypoint x="1020" y="600" /><di:waypoint x="1020" y="403" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>

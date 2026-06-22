@@ -1,0 +1,163 @@
+@startuml erd_payment
+' =====================================================================
+'  ER-модель БД Payment Gateway Service (PostgreSQL 16).
+'  Нотация: crow's foot. PK — первичный ключ, FK — внешний ключ.
+'  Кардинальность подписана на связях (1:M).
+'  Карточные данные (PAN/CVV) НЕ хранятся — только токены эквайера.
+' =====================================================================
+title ERD — Payment Gateway Service (PostgreSQL)
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+hide circle
+skinparam linetype ortho
+skinparam class {
+  BackgroundColor #EAF2FB
+  BorderColor #2C6FB5
+  ArrowColor #2C6FB5
+}
+
+entity "customer" as customer {
+  * id : UUID <<PK>>
+  --
+  * external_user_id : varchar(64)  ' id студента из lms
+  * email : varchar(255)
+  phone : varchar(20)
+  * created_at : timestamptz
+}
+
+entity "payment_method" as payment_method {
+  * id : UUID <<PK>>
+  --
+  * customer_id : UUID <<FK>>
+  * provider : varchar(32)          ' эквайер
+  * token : varchar(128)            ' токен карты (PAN не хранится)
+  * card_brand : varchar(16)        ' VISA|MASTERCARD|MIR
+  * card_last4 : char(4)
+  * exp_month : smallint
+  * exp_year : smallint
+  * is_active : boolean
+  * created_at : timestamptz
+}
+
+entity "plan" as plan {
+  * id : UUID <<PK>>
+  --
+  * code : varchar(48)
+  * title : varchar(255)
+  * amount : numeric(12,2)
+  * currency : char(3)
+  * period : varchar(16)            ' MONTH|YEAR
+  * is_active : boolean
+}
+
+entity "subscription" as subscription {
+  * id : UUID <<PK>>
+  --
+  * customer_id : UUID <<FK>>
+  * plan_id : UUID <<FK>>
+  * payment_method_id : UUID <<FK>>
+  * status : varchar(24)            ' ACTIVE|PAST_DUE|CANCELLED
+  * current_period_end : timestamptz
+  * next_charge_at : timestamptz
+  * dunning_attempts : smallint
+  * created_at : timestamptz
+}
+
+entity "payment" as payment {
+  * id : UUID <<PK>>
+  --
+  * customer_id : UUID <<FK>>
+  subscription_id : UUID <<FK>>
+  * payment_method_id : UUID <<FK>>
+  * amount : numeric(12,2)
+  * captured_amount : numeric(12,2)
+  * currency : char(3)
+  * status : varchar(24)            ' PENDING|AUTHORIZED|SUCCEEDED|DECLINED|REFUNDED|CHARGEBACK
+  * type : varchar(16)              ' ONE_STAGE|TWO_STAGE|RECURRING
+  * external_payment_id : varchar(64)
+  * idempotency_key : varchar(64)
+  is_disputed : boolean
+  hold_expires_at : timestamptz
+  * created_at : timestamptz
+  * updated_at : timestamptz
+}
+
+entity "transaction" as transaction {
+  * id : UUID <<PK>>
+  --
+  * payment_id : UUID <<FK>>
+  * kind : varchar(16)              ' AUTH|CAPTURE|REFUND|CHARGEBACK
+  * amount : numeric(12,2)
+  * status : varchar(16)
+  * provider_code : varchar(48)
+  * raw_response : jsonb
+  * created_at : timestamptz
+}
+
+entity "receipt" as receipt {
+  * id : UUID <<PK>>
+  --
+  * payment_id : UUID <<FK>>
+  * type : varchar(24)              ' INCOME|INCOME_REFUND
+  * status : varchar(24)            ' PENDING|REGISTERED|PENDING_RETRY|REJECTED
+  * fiscal_sign : varchar(32)       ' ФП
+  * fiscal_number : varchar(32)
+  * total : numeric(12,2)
+  * items : jsonb                   ' позиции, НДС, признак расчёта
+  * registered_at : timestamptz
+}
+
+entity "chargeback" as chargeback {
+  * id : UUID <<PK>>
+  --
+  * payment_id : UUID <<FK>>
+  * external_event_id : varchar(64)
+  * status : varchar(16)            ' OPENED|WON|LOST
+  * reason_code : varchar(32)
+  * amount : numeric(12,2)
+  * opened_at : timestamptz
+  resolved_at : timestamptz
+}
+
+entity "webhook_event" as webhook_event {
+  * id : UUID <<PK>>
+  --
+  * provider : varchar(32)
+  * external_event_id : varchar(64) ' UNIQUE (provider, external_event_id)
+  * event_type : varchar(48)
+  * payload : jsonb
+  * received_at : timestamptz
+  * processed : boolean
+}
+
+entity "outbox_event" as outbox_event {
+  * id : UUID <<PK>>
+  --
+  * aggregate_type : varchar(48)
+  * aggregate_id : UUID
+  * event_type : varchar(64)
+  * payload : jsonb
+  * created_at : timestamptz
+  * published_at : timestamptz
+}
+
+' --------- связи и кардинальность ---------
+customer        ||--o{ payment_method : "1:M владеет"
+customer        ||--o{ subscription   : "1:M оформляет"
+customer        ||--o{ payment        : "1:M совершает"
+plan            ||--o{ subscription   : "1:M по тарифу"
+payment_method  ||--o{ subscription   : "1:M оплачивается"
+payment_method  ||--o{ payment        : "1:M используется"
+subscription    ||--o{ payment        : "1:M порождает"
+payment         ||--|{ transaction    : "1:M содержит"
+payment         ||--o{ receipt        : "1:M фискализирует"
+payment         ||--o{ chargeback     : "1:M оспаривается"
+
+note bottom of webhook_event
+  Дедупликация вебхуков по UNIQUE
+  (provider, external_event_id) —
+  идемпотентная обработка событий эквайера/ОФД.
+end note
+
+@enduml

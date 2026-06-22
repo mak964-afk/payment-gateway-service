@@ -1,0 +1,328 @@
+openapi: 3.0.3
+info:
+  title: Payment Gateway Service API
+  version: 1.0.0
+  description: >
+    Промышленный фрагмент спецификации PGS. Демонстрирует ключевой метод
+    проведения платежа: одностадийная оплата и двухстадийная (hold), привязка
+    подписки, идемпотентность и состав фискального чека по 54-ФЗ.
+  contact:
+    name: Payments Platform Team
+    email: payments-team@edux.example
+servers:
+  - url: https://api.edux.example/payments
+    description: Production
+  - url: https://api.staging.edux.example/payments
+    description: Staging
+
+tags:
+  - name: Payments
+    description: Проведение платежей
+
+paths:
+  /api/v1/payments/charge:
+    post:
+      tags: [Payments]
+      operationId: chargePayment
+      summary: Провести платёж (одностадийный или двухстадийный)
+      description: >
+        Проводит оплату по токену карты. При `capture=true` выполняется
+        одностадийное списание; при `capture=false` — только авторизация (hold),
+        списание выполняется позже через `/capture`. Операция идемпотентна по
+        заголовку `Idempotency-Key`: повтор того же ключа не приводит к
+        повторному списанию.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: Уникальный ключ операции для защиты от двойного списания.
+          schema:
+            type: string
+            maxLength: 64
+            example: "PAY-7f1c2d3e-2025-06"
+        - name: X-Request-Id
+          in: header
+          required: false
+          description: Сквозной идентификатор трассировки.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChargeRequest'
+            examples:
+              oneStageSubscription:
+                summary: Первичная оплата подписки (одностадийная)
+                value:
+                  amount: 1490.00
+                  currency: "RUB"
+                  capture: true
+                  paymentMethodToken: "tok_2c91aa...e7"
+                  subscriptionId: "8f1c2d3e-0000-4a00-9b00-aaaaaaaaaaaa"
+                  customer:
+                    externalUserId: "stud-90217"
+                    email: "student@example.com"
+                  receipt:
+                    taxSystem: "usn_income"
+                    items:
+                      - description: "Подписка «Библиотека PRO», 1 мес"
+                        quantity: 1
+                        amount: 1490.00
+                        vat: "none"
+                        paymentMethod: "full_payment"
+                        paymentObject: "service"
+              twoStageCourse:
+                summary: Двухстадийная оплата курса (hold)
+                value:
+                  amount: 4990.00
+                  currency: "RUB"
+                  capture: false
+                  paymentMethodToken: "tok_2c91aa...e7"
+                  customer:
+                    externalUserId: "stud-90217"
+                    email: "student@example.com"
+                  receipt:
+                    taxSystem: "usn_income"
+                    items:
+                      - description: "Курс «Системный анализ с нуля»"
+                        quantity: 1
+                        amount: 4990.00
+                        vat: "none"
+                        paymentMethod: "full_prepayment"
+                        paymentObject: "service"
+      responses:
+        '200':
+          description: Платёж проведён (или захолдирован при capture=false).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentResponse'
+              examples:
+                succeeded:
+                  summary: Успешное одностадийное списание
+                  value:
+                    paymentId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+                    status: "SUCCEEDED"
+                    amount: 1490.00
+                    capturedAmount: 1490.00
+                    currency: "RUB"
+                    externalPaymentId: "29a7b...c1"
+                    receiptStatus: "PENDING"
+                    createdAt: "2026-06-22T10:15:30Z"
+                authorized:
+                  summary: Двухстадийный платёж — холд
+                  value:
+                    paymentId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+                    status: "AUTHORIZED"
+                    amount: 4990.00
+                    capturedAmount: 0.00
+                    currency: "RUB"
+                    externalPaymentId: "29a7b...c1"
+                    holdExpiresAt: "2026-06-29T10:15:30Z"
+                    receiptStatus: "DEFERRED"
+                    createdAt: "2026-06-22T10:15:30Z"
+        '400':
+          description: Некорректный синтаксис запроса (битый JSON, нет обязательных полей).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "BAD_REQUEST"
+                message: "Field 'paymentMethodToken' is required"
+                requestId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+        '402':
+          description: Платёж отклонён эквайером.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                insufficientFunds:
+                  value:
+                    code: "PAYMENT_DECLINED"
+                    message: "Card declined: insufficient_funds"
+                    declineReason: "insufficient_funds"
+                    requestId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+        '409':
+          description: Конфликт идемпотентности (тот же ключ с другим телом запроса).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "IDEMPOTENCY_CONFLICT"
+                message: "Idempotency-Key already used with a different payload"
+                requestId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+        '422':
+          description: Синтаксис верный, но бизнес-валидация не пройдена.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              examples:
+                receiptMismatch:
+                  value:
+                    code: "RECEIPT_TOTAL_MISMATCH"
+                    message: "Sum of receipt items must equal 'amount'"
+                    requestId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+        '500':
+          description: Внутренняя ошибка сервиса.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "INTERNAL_ERROR"
+                message: "Unexpected error, see requestId in logs"
+                requestId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
+
+components:
+  schemas:
+    ChargeRequest:
+      type: object
+      required: [amount, currency, capture, paymentMethodToken, customer, receipt]
+      properties:
+        amount:
+          type: number
+          format: double
+          minimum: 1
+          example: 1490.00
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: "RUB"
+        capture:
+          type: boolean
+          description: "true — одностадийное списание; false — авторизация (hold)."
+          example: true
+        paymentMethodToken:
+          type: string
+          description: "Токен карты от эквайера. PAN/CVV в PGS не передаются."
+          example: "tok_2c91aa...e7"
+        subscriptionId:
+          type: string
+          format: uuid
+          nullable: true
+          description: "Заполняется для рекуррентных платежей по подписке."
+        customer:
+          $ref: '#/components/schemas/Customer'
+        receipt:
+          $ref: '#/components/schemas/Receipt'
+
+    Customer:
+      type: object
+      required: [externalUserId, email]
+      properties:
+        externalUserId:
+          type: string
+          example: "stud-90217"
+        email:
+          type: string
+          format: email
+          example: "student@example.com"
+        phone:
+          type: string
+          nullable: true
+          example: "+79991234567"
+
+    Receipt:
+      type: object
+      required: [taxSystem, items]
+      description: "Состав фискального чека по 54-ФЗ."
+      properties:
+        taxSystem:
+          type: string
+          enum: [osn, usn_income, usn_income_outcome, esn, patent]
+          example: "usn_income"
+        items:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/ReceiptItem'
+
+    ReceiptItem:
+      type: object
+      required: [description, quantity, amount, vat, paymentMethod, paymentObject]
+      properties:
+        description:
+          type: string
+          maxLength: 128
+          example: "Подписка «Библиотека PRO», 1 мес"
+        quantity:
+          type: number
+          format: double
+          minimum: 1
+          example: 1
+        amount:
+          type: number
+          format: double
+          minimum: 0
+          example: 1490.00
+        vat:
+          type: string
+          enum: [none, vat0, vat10, vat20]
+          example: "none"
+        paymentMethod:
+          type: string
+          enum: [full_payment, full_prepayment, advance]
+          example: "full_payment"
+        paymentObject:
+          type: string
+          enum: [service, commodity, payment]
+          example: "service"
+
+    PaymentResponse:
+      type: object
+      required: [paymentId, status, amount, currency, createdAt]
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, AUTHORIZED, SUCCEEDED, DECLINED]
+        amount:
+          type: number
+          format: double
+          example: 1490.00
+        capturedAmount:
+          type: number
+          format: double
+          example: 1490.00
+        currency:
+          type: string
+          example: "RUB"
+        externalPaymentId:
+          type: string
+          example: "29a7b...c1"
+        holdExpiresAt:
+          type: string
+          format: date-time
+          nullable: true
+        receiptStatus:
+          type: string
+          enum: [PENDING, DEFERRED, REGISTERED]
+        createdAt:
+          type: string
+          format: date-time
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: "PAYMENT_DECLINED"
+        message:
+          type: string
+        declineReason:
+          type: string
+          nullable: true
+          example: "insufficient_funds"
+        requestId:
+          type: string
+          format: uuid

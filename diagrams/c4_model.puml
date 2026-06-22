@@ -1,0 +1,81 @@
+@startuml c4_payment
+' =====================================================================
+'  Модель C4 (уровень Context) для PGS.
+'  Используется библиотека C4-PlantUML (C4_Context.puml).
+' =====================================================================
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
+
+LAYOUT_WITH_LEGEND()
+title C4 Level 1 — System Context: Payment Gateway Service
+
+Person(student, "Студент", "Оплачивает курсы и подписки, отменяет подписку")
+Person(finops, "Финансовый оператор", "Разбирает чарджбэки и инциденты фискализации")
+
+System(pgs, "Payment Gateway Service", "Оплата, подписки, холдирование, фискализация 54-ФЗ, чарджбэки")
+
+System(lms, "LMS (онлайн-школа)", "Курсы, доступы, жизненный цикл обучения")
+System(notification, "Notification Service", "Уведомления студенту")
+System(finance, "Finance / Бухгалтерия", "Сверка, проводки, отчётность")
+
+System_Ext(acquirer, "Эквайер (PSP)", "Карточные операции: оплата, холд, возврат, вебхуки")
+System_Ext(ofd, "ОФД", "Регистрация фискальных чеков по 54-ФЗ")
+
+Rel(student, lms, "Покупает курс/подписку", "HTTPS")
+Rel(finops, pgs, "Разбирает чарджбэки", "HTTPS")
+Rel(lms, pgs, "Оплата, холд/капчура, возврат", "REST/JSON")
+Rel(pgs, lms, "payment.succeeded / chargeback_opened", "Kafka")
+Rel(pgs, notification, "Запрос обновить карту, статусы", "Kafka")
+Rel(pgs, finance, "payment.succeeded / refunded", "Kafka")
+Rel(pgs, acquirer, "Проведение операций по токену", "REST/JSON")
+Rel(acquirer, pgs, "Вебхуки: оплата, возврат, чарджбэк", "HTTPS")
+Rel(pgs, ofd, "Регистрация чеков", "REST/JSON")
+Rel(ofd, pgs, "Фискальный признак чека", "HTTPS")
+
+@enduml
+
+@startuml c4_payment_container
+' =====================================================================
+'  Модель C4 (уровень Container) для PGS.
+'  Используется библиотека C4-PlantUML (C4_Container.puml).
+' =====================================================================
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+LAYOUT_WITH_LEGEND()
+title C4 Level 2 — Container: внутри Payment Gateway Service
+
+Person(student, "Студент")
+System(lms, "LMS (онлайн-школа)", "Внешний домен")
+System_Ext(acquirer, "Эквайер (PSP)")
+System_Ext(ofd, "ОФД")
+
+System_Boundary(pgs, "Payment Gateway Service") {
+    Container(api, "Payment API", "Java 21, Spring Boot", "REST: /payments/charge, /capture, /refund; валидация, идемпотентность")
+    Container(core, "Payment Core (Domain)", "Java 21", "Конечный автомат платежа, подписки, dunning, доменные правила")
+    Container(acqAdapter, "Acquirer Adapter (ACL)", "Java 21, Resilience4j", "Маппинг в/из эквайера, Circuit Breaker + Retry")
+    Container(ofdAdapter, "OFD Adapter (ACL)", "Java 21, Resilience4j", "Фискализация чеков 54-ФЗ, Circuit Breaker + Retry")
+    Container(webhook, "Webhook Receiver", "Java 21, Spring Boot", "Приём вебхуков, проверка HMAC, дедупликация")
+    Container(scheduler, "Scheduler", "Java 21, Quartz/Zeebe", "Рекуррент, dunning-повторы, автоотмена холда")
+    Container(publisher, "Outbox Publisher", "Java 21", "Читает outbox, публикует доменные события")
+    ContainerDb(db, "Payment DB", "PostgreSQL 16", "Платежи, подписки, токены, чеки, чарджбэки, outbox")
+    ContainerDb(cache, "Cache", "Redis", "Идемпотентные ключи, rate limiting, кэш токенов")
+    ContainerQueue(kafka, "Event Bus", "Apache Kafka", "Доменные события платежей и подписок")
+}
+
+Rel(student, lms, "Использует")
+Rel(lms, api, "Оплата/холд/возврат", "REST/JSON")
+Rel(api, core, "Делегирует доменную логику")
+Rel(api, cache, "Идемпотентность, rate limiting", "RESP")
+Rel(core, db, "Читает/пишет платежи и подписки", "JDBC")
+Rel(core, acqAdapter, "Оплата/холд/возврат")
+Rel(core, ofdAdapter, "Фискализация чека")
+Rel(scheduler, core, "Рекуррент, dunning, автоотмена холда")
+Rel(acqAdapter, acquirer, "REST/JSON")
+Rel(ofdAdapter, ofd, "REST/JSON")
+Rel(acquirer, webhook, "Вебхуки: оплата/возврат/чарджбэк", "HTTPS")
+Rel(webhook, core, "Обновление статуса")
+Rel(core, db, "Запись события в Outbox", "JDBC")
+Rel(publisher, db, "Читает Outbox", "JDBC")
+Rel(publisher, kafka, "Публикует события")
+Rel(kafka, lms, "payment.succeeded / chargeback_opened")
+
+@enduml

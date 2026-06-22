@@ -1,0 +1,126 @@
+@startuml sequence_payment_webhook_failure
+' =====================================================================
+'  Самый сложный сценарий: обработка вебхука об оплате от эквайера, когда
+'  последующая фискализация в ОФД сбоит из-за обрыва связи. Показаны
+'  проверка подписи, дедупликация (идемпотентность), таймаут, Retry с
+'  backoff, Circuit Breaker (CLOSED -> OPEN -> HALF_OPEN -> CLOSED) и
+'  отложенная компенсация через очередь. Платёж при этом НЕ откатывается.
+' =====================================================================
+title Sequence — Вебхук оплаты + сбой ОФД (Timeout + Retry + Circuit Breaker)
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+skinparam ParticipantBackgroundColor #EAF2FB
+skinparam ParticipantBorderColor #2C6FB5
+
+participant "Эквайер (PSP)" as Acq
+participant "Webhook Receiver" as WH
+participant "Payment Core" as Core
+database "Payment DB" as DB
+participant "OFD Adapter\n(Resilience4j)" as Adapter
+participant "Circuit Breaker" as CB
+queue "Retry Queue\n(Kafka)" as RQ
+participant "ОФД" as OFD
+participant "Outbox Publisher" as Pub
+queue "Event Bus" as Bus
+
+autonumber
+
+Acq -> WH : POST /webhooks/acquirer\n(event=payment.succeeded, id=EVT-9, sig)
+activate WH
+
+WH -> WH : проверить HMAC-подпись
+alt Подпись невалидна
+    WH --> Acq : 401 Unauthorized
+else Подпись валидна
+    WH -> DB : SELECT webhook_event\nWHERE external_event_id=EVT-9
+    activate DB
+    DB --> WH : не найдено (новое событие)
+    deactivate DB
+
+    alt Дубликат события
+        WH --> Acq : 200 OK (идемпотентно, без изменений)
+    else Новое событие
+        WH -> Core : applyPaymentSucceeded(PAY-1)
+        activate Core
+        Core -> DB : UPDATE PAY-1 -> SUCCEEDED\n+ INSERT webhook_event(EVT-9)\n+ INSERT outbox(payment.succeeded)
+        Core --> WH : OK
+        deactivate Core
+        WH --> Acq : 200 OK (быстрый ответ)
+        deactivate WH
+        note over WH,Acq : Вебхук подтверждён сразу,\nфискализация — асинхронно
+
+        == Асинхронная фискализация чека ==
+        Pub -> DB : выбрать outbox(payment.succeeded)
+        activate Pub
+        Pub -> Bus : publish payment.succeeded
+        Pub -> DB : пометить outbox отправленным
+        deactivate Pub
+
+        Core -> Adapter : registerReceipt(PAY-1)
+        activate Adapter
+        Adapter -> CB : проверить состояние
+        activate CB
+        CB --> Adapter : CLOSED (пропустить вызов)
+        deactivate CB
+
+        == Попытка 1 (таймаут) ==
+        Adapter -> OFD : POST /receipts
+        activate OFD
+        note right of OFD : Обрыв связи с ОФД
+        OFD --> Adapter : timeout (> 3000 мс)
+        deactivate OFD
+        Adapter -> CB : зафиксировать сбой
+
+        == Попытка 2 (backoff 2s, ошибка) ==
+        Adapter -> OFD : POST /receipts
+        activate OFD
+        OFD --> Adapter : HTTP 503
+        deactivate OFD
+        Adapter -> CB : порог сбоев превышен
+        activate CB
+        CB --> CB : state -> OPEN
+        CB --> Adapter : OPEN (быстрый отказ)
+        deactivate CB
+
+        Adapter --> Core : FiscalUnavailableException
+        deactivate Adapter
+
+        Core -> DB : чек PAY-1 -> PENDING_RETRY\n(платёж остаётся SUCCEEDED)
+        Core -> RQ : enqueue RegisterReceipt(PAY-1)
+        note over Core : Платёж НЕ откатывается —\nчек догонит позже
+
+        ... cooldown, Circuit Breaker -> HALF_OPEN ...
+
+        RQ -> Core : повторная доставка RegisterReceipt(PAY-1)
+        activate Core
+        Core -> Adapter : registerReceipt(PAY-1)
+        activate Adapter
+        Adapter -> CB : проверить состояние
+        activate CB
+        CB --> Adapter : HALF_OPEN (пробный вызов)
+        deactivate CB
+        Adapter -> OFD : POST /receipts
+        activate OFD
+        OFD --> Adapter : 200 OK (ФП, номер чека)
+        deactivate OFD
+        Adapter -> CB : зафиксировать успех
+        activate CB
+        CB --> CB : state -> CLOSED
+        deactivate CB
+        Adapter --> Core : OK (фискальный признак)
+        deactivate Adapter
+
+        Core -> DB : чек PAY-1 -> REGISTERED\n+ INSERT outbox(receipt.registered)
+        Core --> RQ : ack
+        deactivate Core
+
+        Pub -> DB : выбрать outbox(receipt.registered)
+        activate Pub
+        Pub -> Bus : publish receipt.registered
+        deactivate Pub
+    end
+end
+
+@enduml

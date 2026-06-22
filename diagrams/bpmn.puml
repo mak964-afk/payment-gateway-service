@@ -1,0 +1,83 @@
+@startuml bpmn_payment_end_to_end
+' =====================================================================
+'  BPMN-style сквозной процесс оплаты подписки с фискализацией (54-ФЗ).
+'  Реализован как Activity Diagram со swimlanes (пулы/дорожки).
+'  Дорожки = роли/системы.
+' =====================================================================
+title Сквозной бизнес-процесс оплаты подписки с фискализацией (BPMN)
+
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam ActivityBackgroundColor #EAF2FB
+skinparam ActivityBorderColor #2C6FB5
+skinparam ActivityDiamondBackgroundColor #FFF6E0
+skinparam ActivityDiamondBorderColor #C8902A
+skinparam swimlaneBorderColor #999999
+skinparam swimlaneTitleBackgroundColor #F0F0F0
+
+|#FDF1F1|Студент|
+start
+:Выбирает подписку на курсы;
+:Подтверждает оплату
+(вводит карту у эквайера);
+
+|#E8F5E9|lms (онлайн-школа)|
+:Инициирует оплату в PGS
+(токен, сумма, Idempotency-Key);
+
+|#EAF2FB|PGS: Платёж|
+:Проверить идемпотентность;
+if (Ключ уже обработан?) then (да)
+  :Вернуть прежний результат;
+  stop
+else (нет)
+  :Сохранить платёж = PENDING
+  (+ запись в Outbox);
+endif
+:Вызвать эквайер
+(списание по токену);
+
+|#F3E5F5|Эквайер|
+:Проводит операцию по карте;
+if (Операция одобрена?) then (да)
+  |#EAF2FB|PGS: Платёж|
+  :Платёж = SUCCEEDED;
+  :Создать подписку / продлить,
+  сохранить токен;
+  :Публиковать payment.succeeded;
+else (нет)
+  |#EAF2FB|PGS: Платёж|
+  :Платёж = DECLINED;
+  |#E8F5E9|lms (онлайн-школа)|
+  :Показать причину отказа,
+  доступ не выдан;
+  stop
+endif
+
+|#EAF2FB|PGS: Фискализация|
+:Сформировать чек прихода
+(позиции, НДС, контакт);
+:Отправить чек в ОФД;
+
+|#FFF3E0|ОФД|
+repeat
+  :Регистрирует чек;
+  |#EAF2FB|PGS: Фискализация|
+  if (Чек зарегистрирован?) then (да)
+    :Чек = REGISTERED, сохранить ФП;
+    :Публиковать receipt.registered;
+  else (нет, ОФД недоступен)
+    :Чек = PENDING_RETRY,
+    повтор с backoff;
+    |#FFF3E0|ОФД|
+  endif
+repeat while (Чек зарегистрирован?) is (нет) not (да)
+
+|#E8F5E9|lms (онлайн-школа)|
+:Открывает доступ к курсам;
+
+|#FDF1F1|Студент|
+:Получает доступ и чек на email;
+stop
+
+@enduml
