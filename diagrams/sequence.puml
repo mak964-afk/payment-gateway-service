@@ -6,7 +6,7 @@
 '  backoff, Circuit Breaker (CLOSED -> OPEN -> HALF_OPEN -> CLOSED) и
 '  отложенная компенсация через очередь. Платёж при этом НЕ откатывается.
 ' =====================================================================
-title Sequence — Вебхук оплаты + сбой ОФД (Timeout + Retry + Circuit Breaker)
+title Sequence – Вебхук оплаты + сбой ОФД (Timeout + Retry + Circuit Breaker)
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -49,7 +49,7 @@ else Подпись валидна
         deactivate Core
         WH --> Acq : 200 OK (быстрый ответ)
         deactivate WH
-        note over WH,Acq : Вебхук подтверждён сразу,\nфискализация — асинхронно
+        note over WH,Acq : Вебхук подтверждён сразу,\nфискализация – асинхронно
 
         == Асинхронная фискализация чека ==
         Pub -> DB : выбрать outbox(payment.succeeded)
@@ -89,7 +89,7 @@ else Подпись валидна
 
         Core -> DB : чек PAY-1 -> PENDING_RETRY\n(платёж остаётся SUCCEEDED)
         Core -> RQ : enqueue RegisterReceipt(PAY-1)
-        note over Core : Платёж НЕ откатывается —\nчек догонит позже
+        note over Core : Платёж НЕ откатывается –\nчек догонит позже
 
         ... cooldown, Circuit Breaker -> HALF_OPEN ...
 

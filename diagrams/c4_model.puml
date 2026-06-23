@@ -6,7 +6,7 @@
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
 
 LAYOUT_WITH_LEGEND()
-title C4 Level 1 — System Context: Payment Gateway Service
+title C4 Level 1 – System Context: Payment Gateway Service
 
 Person(student, "Студент", "Оплачивает курсы и подписки, отменяет подписку")
 Person(finops, "Финансовый оператор", "Разбирает чарджбэки и инциденты фискализации")
@@ -41,7 +41,7 @@ Rel(ofd, pgs, "Фискальный признак чека", "HTTPS")
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 
 LAYOUT_WITH_LEGEND()
-title C4 Level 2 — Container: внутри Payment Gateway Service
+title C4 Level 2 – Container: внутри Payment Gateway Service
 
 Person(student, "Студент")
 System(lms, "LMS (онлайн-школа)", "Внешний домен")

@@ -1,11 +1,11 @@
 @startuml erd_payment
 ' =====================================================================
 '  ER-модель БД Payment Gateway Service (PostgreSQL 16).
-'  Нотация: crow's foot. PK — первичный ключ, FK — внешний ключ.
+'  Нотация: crow's foot. PK – первичный ключ, FK – внешний ключ.
 '  Кардинальность подписана на связях (1:M).
-'  Карточные данные (PAN/CVV) НЕ хранятся — только токены эквайера.
+'  Карточные данные (PAN/CVV) НЕ хранятся – только токены эквайера.
 ' =====================================================================
-title ERD — Payment Gateway Service (PostgreSQL)
+title ERD – Payment Gateway Service (PostgreSQL)
 
 skinparam backgroundColor #FFFFFF
 skinparam shadowing false
@@ -156,7 +156,7 @@ payment         ||--o{ chargeback     : "1:M оспаривается"
 
 note bottom of webhook_event
   Дедупликация вебхуков по UNIQUE
-  (provider, external_event_id) —
+  (provider, external_event_id) –
   идемпотентная обработка событий эквайера/ОФД.
 end note
 

@@ -27,7 +27,7 @@ paths:
       summary: Провести платёж (одностадийный или двухстадийный)
       description: >
         Проводит оплату по токену карты. При `capture=true` выполняется
-        одностадийное списание; при `capture=false` — только авторизация (hold),
+        одностадийное списание; при `capture=false` – только авторизация (hold),
         списание выполняется позже через `/capture`. Операция идемпотентна по
         заголовку `Idempotency-Key`: повтор того же ключа не приводит к
         повторному списанию.
@@ -113,7 +113,7 @@ paths:
                     receiptStatus: "PENDING"
                     createdAt: "2026-06-22T10:15:30Z"
                 authorized:
-                  summary: Двухстадийный платёж — холд
+                  summary: Двухстадийный платёж – холд
                   value:
                     paymentId: "3a7b1f90-0000-4a00-9b00-c0ffeec0ffee"
                     status: "AUTHORIZED"
@@ -197,7 +197,7 @@ components:
           example: "RUB"
         capture:
           type: boolean
-          description: "true — одностадийное списание; false — авторизация (hold)."
+          description: "true – одностадийное списание; false – авторизация (hold)."
           example: true
         paymentMethodToken:
           type: string
