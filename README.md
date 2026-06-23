@@ -4,7 +4,6 @@
 > для онлайн-школы.
 
 ![Status](https://img.shields.io/badge/status-design--ready-blue)
-![Methodology](https://img.shields.io/badge/methodology-Docs--as--Code-green)
 ![Notation](https://img.shields.io/badge/notation-C4%20%7C%20BPMN%202.0%20%7C%20UML-orange)
 ![API](https://img.shields.io/badge/API-OpenAPI%203.0-6BA539)
 ![Compliance](https://img.shields.io/badge/54--ФЗ%20%7C%20PCI%20DSS-aware-red)
