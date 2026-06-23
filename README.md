@@ -194,7 +194,12 @@ payment-gateway-service/
 ### ER-модель данных
 ![ERD](diagrams/rendered/erd_payment.png)
 
-### Жизненный цикл платежа — Mermaid (рендерится на GitHub нативно)
+### Жизненный цикл платежа (диаграмма состояний)
+
+Диаграмма состояний платежа: одностадийная оплата и двухстадийный холд
+(`AUTHORIZED → capture → SUCCEEDED`), отказ эквайера с рекуррентными повторами
+(dunning через `RETRY_SCHEDULED`) и пост-успешные переходы — возврат
+(`REFUNDED`) и чарджбэк от банка (`CHARGEBACK`):
 
 ```mermaid
 stateDiagram-v2
